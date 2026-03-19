@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import Field
 import os
 import json
+import base64
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
+from google.ads.googleads.client import GoogleAdsClient
+from google.ads.googleads.errors import GoogleAdsException
 import logging
 
 # MCP
@@ -113,8 +116,27 @@ def get_headers(creds):
     
     if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
         headers['login-customer-id'] = format_customer_id(GOOGLE_ADS_LOGIN_CUSTOMER_ID)
-    
+
     return headers
+
+def get_google_ads_client() -> GoogleAdsClient:
+    """Build a GoogleAdsClient from the same env vars used by the REST tools."""
+    config = {
+        "developer_token": os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN"),
+        "client_id": os.environ.get("GOOGLE_ADS_CLIENT_ID"),
+        "client_secret": os.environ.get("GOOGLE_ADS_CLIENT_SECRET"),
+        "refresh_token": os.environ.get("GOOGLE_ADS_REFRESH_TOKEN"),
+        "use_proto_plus": True,
+    }
+    login_customer_id = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+    if login_customer_id:
+        config["login_customer_id"] = format_customer_id(login_customer_id)
+
+    missing = [k for k, v in config.items() if v is None and k != "login_customer_id"]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    return GoogleAdsClient.load_from_dict(config)
 
 @mcp.tool()
 async def list_accounts() -> str:
@@ -1344,6 +1366,1037 @@ async def list_resources(
     
     # Use your existing run_gaql function to execute this query
     return await run_gaql(customer_id, query)
+
+
+# ── Mutate tools ──────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def update_ad_group_cpc(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID to update"),
+    cpc_bid_micros: int = Field(description="New CPC bid in micros (e.g. 2500000 = $2.50)")
+) -> dict:
+    """Update the CPC bid on a single ad group."""
+    client = get_google_ads_client()
+    ag_service = client.get_service("AdGroupService")
+    op = client.get_type("AdGroupOperation")
+
+    ag = op.update
+    ag.resource_name = ag_service.ad_group_path(format_customer_id(customer_id), ad_group_id)
+    ag.cpc_bid_micros = cpc_bid_micros
+    op.update_mask.paths.append("cpc_bid_micros")
+
+    try:
+        response = ag_service.mutate_ad_groups(
+            customer_id=format_customer_id(customer_id),
+            operations=[op]
+        )
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def batch_update_ad_group_cpcs(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    updates: list = Field(description='List of {"ad_group_id": "...", "cpc_bid_micros": 2500000}')
+) -> dict:
+    """Update CPC bids on multiple ad groups in one API call."""
+    client = get_google_ads_client()
+    ag_service = client.get_service("AdGroupService")
+    cid = format_customer_id(customer_id)
+    operations = []
+
+    for u in updates:
+        op = client.get_type("AdGroupOperation")
+        ag = op.update
+        ag.resource_name = ag_service.ad_group_path(cid, u["ad_group_id"])
+        ag.cpc_bid_micros = u["cpc_bid_micros"]
+        op.update_mask.paths.append("cpc_bid_micros")
+        operations.append(op)
+
+    try:
+        response = ag_service.mutate_ad_groups(customer_id=cid, operations=operations)
+        return {"success": True, "updated": [r.resource_name for r in response.results]}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_keyword(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID to add the keyword to"),
+    keyword_text: str = Field(description="Keyword text"),
+    match_type: str = Field(description="Match type: EXACT, PHRASE, or BROAD"),
+    cpc_bid_micros: int = Field(default=0, description="CPC bid in micros (ignored for negative keywords)"),
+    negative: bool = Field(default=False, description="True to add as a negative keyword"),
+    status: str = Field(default="PAUSED", description="ENABLED or PAUSED")
+) -> dict:
+    """Create a keyword (positive or negative) in an ad group."""
+    client = get_google_ads_client()
+    agc_service = client.get_service("AdGroupCriterionService")
+    op = client.get_type("AdGroupCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    agc = op.create
+    agc.ad_group = client.get_service("AdGroupService").ad_group_path(cid, ad_group_id)
+    agc.keyword.text = keyword_text
+    agc.keyword.match_type = getattr(client.enums.KeywordMatchTypeEnum, match_type.upper())
+    agc.negative = negative
+    agc.status = getattr(client.enums.AdGroupCriterionStatusEnum, status.upper())
+
+    if not negative and cpc_bid_micros:
+        agc.cpc_bid_micros = cpc_bid_micros
+
+    try:
+        response = agc_service.mutate_ad_group_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_campaign_negative_keyword(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to add the negative keyword to"),
+    keyword_text: str = Field(description="Keyword text to block"),
+    match_type: str = Field(default="BROAD", description="Match type: EXACT, PHRASE, or BROAD")
+) -> dict:
+    """Add a negative keyword at the campaign level."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    criterion = op.create
+    criterion.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    criterion.negative = True
+    criterion.keyword.text = keyword_text
+    criterion.keyword.match_type = getattr(client.enums.KeywordMatchTypeEnum, match_type.upper())
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_rsa_ad(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID to create the ad in"),
+    headlines: list = Field(description="List of up to 15 headline strings"),
+    descriptions: list = Field(description="List of up to 4 description strings"),
+    final_url: str = Field(description="Landing page URL"),
+    path1: str = Field(default="", description="Optional display path 1 (shown in ad URL)"),
+    path2: str = Field(default="", description="Optional display path 2 (shown in ad URL)"),
+    status: str = Field(default="PAUSED", description="ENABLED or PAUSED")
+) -> dict:
+    """Create a Responsive Search Ad (RSA) in an ad group."""
+    client = get_google_ads_client()
+    ad_group_ad_service = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    cid = format_customer_id(customer_id)
+
+    ad_group_ad = op.create
+    ad_group_ad.ad_group = client.get_service("AdGroupService").ad_group_path(cid, ad_group_id)
+    ad_group_ad.status = getattr(client.enums.AdGroupAdStatusEnum, status.upper())
+
+    ad = ad_group_ad.ad
+    ad.final_urls.append(final_url)
+    ad.responsive_search_ad.path1 = path1
+    ad.responsive_search_ad.path2 = path2
+
+    for text in headlines[:15]:
+        asset = client.get_type("AdTextAsset")
+        asset.text = text
+        ad.responsive_search_ad.headlines.append(asset)
+
+    for text in descriptions[:4]:
+        asset = client.get_type("AdTextAsset")
+        asset.text = text
+        ad.responsive_search_ad.descriptions.append(asset)
+
+    try:
+        response = ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Additional reporting tools ────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_search_terms_report(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    days: int = Field(default=30, description="Number of days to look back"),
+    campaign_id: str = Field(default=None, description="Optional: filter to a single campaign ID")
+) -> str:
+    """
+    Show which search terms triggered your ads, with clicks, cost, and conversions.
+    Essential for finding new negative keywords or keyword opportunities.
+    """
+    where_parts = [f"segments.date DURING LAST_{days}_DAYS"]
+    if campaign_id:
+        where_parts.append(f"campaign.id = {campaign_id}")
+    query = f"""
+        SELECT
+            search_term_view.search_term,
+            search_term_view.status,
+            campaign.id,
+            campaign.name,
+            ad_group.name,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.ctr
+        FROM search_term_view
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY metrics.impressions DESC
+        LIMIT 500
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_keyword_quality_scores(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(default=None, description="Optional: filter to a single campaign ID")
+) -> str:
+    """
+    Get quality scores, expected CTR, ad relevance, and landing page experience for all keywords.
+    Sort is ascending so the worst-scoring keywords appear first.
+    """
+    where_parts = [
+        "ad_group_criterion.type = 'KEYWORD'",
+        "ad_group_criterion.status != 'REMOVED'",
+    ]
+    if campaign_id:
+        where_parts.append(f"campaign.id = {campaign_id}")
+    query = f"""
+        SELECT
+            campaign.name,
+            ad_group.name,
+            ad_group_criterion.criterion_id,
+            ad_group_criterion.keyword.text,
+            ad_group_criterion.keyword.match_type,
+            ad_group_criterion.quality_info.quality_score,
+            ad_group_criterion.quality_info.search_predicted_ctr,
+            ad_group_criterion.quality_info.creative_quality_score,
+            ad_group_criterion.quality_info.post_click_quality_score
+        FROM ad_group_criterion
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY ad_group_criterion.quality_info.quality_score ASC
+        LIMIT 1000
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_geographic_performance(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    days: int = Field(default=30, description="Number of days to look back")
+) -> str:
+    """Get performance metrics broken down by geographic location."""
+    query = f"""
+        SELECT
+            geographic_view.country_criterion_id,
+            geographic_view.location_type,
+            campaign.name,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.ctr
+        FROM geographic_view
+        WHERE segments.date DURING LAST_{days}_DAYS
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 500
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_device_performance(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    days: int = Field(default=30, description="Number of days to look back")
+) -> str:
+    """Get performance metrics broken down by device (MOBILE, DESKTOP, TABLET)."""
+    query = f"""
+        SELECT
+            segments.device,
+            campaign.name,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.ctr,
+            metrics.average_cpc
+        FROM campaign
+        WHERE segments.date DURING LAST_{days}_DAYS
+        ORDER BY segments.device, metrics.cost_micros DESC
+        LIMIT 500
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_hourly_performance(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    days: int = Field(default=7, description="Number of days to look back (keep ≤14 for hourly data)")
+) -> str:
+    """Get performance metrics broken down by hour of day — useful for ad scheduling decisions."""
+    query = f"""
+        SELECT
+            segments.hour,
+            campaign.name,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.ctr
+        FROM campaign
+        WHERE segments.date DURING LAST_{days}_DAYS
+        ORDER BY segments.hour ASC
+        LIMIT 500
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_budget_utilization(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)")
+) -> str:
+    """
+    Show each active campaign's daily budget vs yesterday's spend.
+    Helps identify underspending or budget-limited campaigns.
+    """
+    query = """
+        SELECT
+            campaign.name,
+            campaign.status,
+            campaign_budget.name,
+            campaign_budget.amount_micros,
+            campaign_budget.period,
+            campaign_budget.total_amount_micros,
+            metrics.cost_micros
+        FROM campaign
+        WHERE segments.date DURING LAST_1_DAYS
+          AND campaign.status = 'ENABLED'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 200
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_auction_insights(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(default=None, description="Optional: filter to a single campaign ID"),
+    days: int = Field(default=30, description="Number of days to look back")
+) -> str:
+    """Show competitor overlap rates and impression share from auction insights."""
+    where_parts = [f"segments.date DURING LAST_{days}_DAYS"]
+    if campaign_id:
+        where_parts.append(f"campaign.id = {campaign_id}")
+    query = f"""
+        SELECT
+            auction_insight_competitor.domain,
+            campaign.name,
+            metrics.auction_insight_search_overlap_rate,
+            metrics.auction_insight_search_outranking_share,
+            metrics.auction_insight_search_position_above_rate,
+            metrics.auction_insight_search_top_impression_percentage,
+            metrics.auction_insight_search_absolute_top_impression_percentage
+        FROM auction_insight_competitor
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY metrics.auction_insight_search_overlap_rate DESC
+        LIMIT 200
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def list_conversion_actions(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)")
+) -> str:
+    """List all conversion actions (goals) defined in the account with their IDs and settings."""
+    query = """
+        SELECT
+            conversion_action.id,
+            conversion_action.name,
+            conversion_action.status,
+            conversion_action.type,
+            conversion_action.category,
+            conversion_action.counting_type,
+            conversion_action.value_settings.default_value,
+            conversion_action.value_settings.always_use_default_value
+        FROM conversion_action
+        WHERE conversion_action.status != 'REMOVED'
+        ORDER BY conversion_action.name
+    """
+    return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def get_recommendations(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)")
+) -> str:
+    """
+    Fetch Google's automated recommendations for the account.
+    The resource_name values returned can be passed to apply_recommendation or dismiss_recommendation.
+    """
+    query = """
+        SELECT
+            recommendation.resource_name,
+            recommendation.type,
+            recommendation.campaign,
+            recommendation.impact.base_metrics.impressions,
+            recommendation.impact.base_metrics.clicks,
+            recommendation.impact.base_metrics.cost_micros,
+            recommendation.impact.potential_metrics.impressions,
+            recommendation.impact.potential_metrics.clicks
+        FROM recommendation
+        LIMIT 50
+    """
+    return await run_gaql(customer_id, query)
+
+
+# ── Campaign structure: create ────────────────────────────────────────────────
+
+@mcp.tool()
+def create_campaign_budget(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    name: str = Field(description="Budget name (must be unique in account)"),
+    amount_micros: int = Field(description="Daily budget in micros — e.g. 10000000 = $10/day"),
+    delivery_method: str = Field(default="STANDARD", description="STANDARD (default pacing) or ACCELERATED")
+) -> dict:
+    """
+    Create a campaign budget. Returns the resource_name to pass into create_campaign.
+    Run this before create_campaign.
+    """
+    client = get_google_ads_client()
+    service = client.get_service("CampaignBudgetService")
+    op = client.get_type("CampaignBudgetOperation")
+    cid = format_customer_id(customer_id)
+
+    budget = op.create
+    budget.name = name
+    budget.amount_micros = amount_micros
+    budget.delivery_method = getattr(client.enums.BudgetDeliveryMethodEnum, delivery_method.upper())
+
+    try:
+        response = service.mutate_campaign_budgets(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    name: str = Field(description="Campaign name"),
+    budget_resource_name: str = Field(description="Resource name returned by create_campaign_budget"),
+    advertising_channel_type: str = Field(default="SEARCH", description="SEARCH, DISPLAY, VIDEO, or SHOPPING"),
+    bidding_strategy: str = Field(default="MANUAL_CPC", description="MANUAL_CPC, TARGET_CPA, TARGET_ROAS, MAXIMIZE_CONVERSIONS, or MAXIMIZE_CONVERSION_VALUE"),
+    status: str = Field(default="PAUSED", description="ENABLED or PAUSED — defaults to PAUSED for safety"),
+    target_cpa_micros: int = Field(default=None, description="Required when bidding_strategy=TARGET_CPA — e.g. 5000000 = $5"),
+    target_roas: float = Field(default=None, description="Required when bidding_strategy=TARGET_ROAS — e.g. 3.0 = 300%")
+) -> dict:
+    """
+    Create a new campaign. Typical flow:
+    create_campaign_budget → create_campaign → create_ad_group → create_keyword / create_rsa_ad
+    """
+    client = get_google_ads_client()
+    service = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    cid = format_customer_id(customer_id)
+
+    campaign = op.create
+    campaign.name = name
+    campaign.campaign_budget = budget_resource_name
+    campaign.advertising_channel_type = getattr(
+        client.enums.AdvertisingChannelTypeEnum, advertising_channel_type.upper()
+    )
+    campaign.status = getattr(client.enums.CampaignStatusEnum, status.upper())
+
+    if advertising_channel_type.upper() == "SEARCH":
+        campaign.network_settings.target_google_search = True
+        campaign.network_settings.target_search_network = True
+        campaign.network_settings.target_content_network = False
+
+    strategy = bidding_strategy.upper()
+    if strategy == "MANUAL_CPC":
+        campaign.manual_cpc.enhanced_cpc_enabled = False
+    elif strategy == "TARGET_CPA":
+        if not target_cpa_micros:
+            return {"success": False, "error": "target_cpa_micros is required for TARGET_CPA"}
+        campaign.target_cpa.target_cpa_micros = target_cpa_micros
+    elif strategy == "TARGET_ROAS":
+        if not target_roas:
+            return {"success": False, "error": "target_roas is required for TARGET_ROAS"}
+        campaign.target_roas.target_roas = target_roas
+    elif strategy == "MAXIMIZE_CONVERSIONS":
+        campaign.maximize_conversions.target_cpa_micros = target_cpa_micros or 0
+    elif strategy == "MAXIMIZE_CONVERSION_VALUE":
+        campaign.maximize_conversion_value.target_roas = target_roas or 0
+
+    try:
+        response = service.mutate_campaigns(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_ad_group(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to create the ad group in"),
+    name: str = Field(description="Ad group name"),
+    cpc_bid_micros: int = Field(default=1000000, description="Default CPC bid in micros — e.g. 1000000 = $1.00"),
+    status: str = Field(default="PAUSED", description="ENABLED or PAUSED")
+) -> dict:
+    """Create an ad group inside a campaign."""
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupService")
+    op = client.get_type("AdGroupOperation")
+    cid = format_customer_id(customer_id)
+
+    ag = op.create
+    ag.name = name
+    ag.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    ag.status = getattr(client.enums.AdGroupStatusEnum, status.upper())
+    ag.cpc_bid_micros = cpc_bid_micros
+
+    try:
+        response = service.mutate_ad_groups(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Campaign / ad group / ad status and field updates ────────────────────────
+
+@mcp.tool()
+def update_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to update"),
+    status: str = Field(default=None, description="ENABLED, PAUSED, or REMOVED"),
+    name: str = Field(default=None, description="New campaign name")
+) -> dict:
+    """Update a campaign's status or name. Use status=REMOVED to permanently delete it."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    cid = format_customer_id(customer_id)
+
+    campaign = op.update
+    campaign.resource_name = service.campaign_path(cid, campaign_id)
+    paths = []
+    if status:
+        campaign.status = getattr(client.enums.CampaignStatusEnum, status.upper())
+        paths.append("status")
+    if name:
+        campaign.name = name
+        paths.append("name")
+    if not paths:
+        return {"success": False, "error": "Provide at least one field to update (status or name)"}
+    op.update_mask.paths.extend(paths)
+
+    try:
+        response = service.mutate_campaigns(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def update_ad_group(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID to update"),
+    status: str = Field(default=None, description="ENABLED, PAUSED, or REMOVED"),
+    name: str = Field(default=None, description="New ad group name"),
+    cpc_bid_micros: int = Field(default=None, description="New default CPC bid in micros")
+) -> dict:
+    """Update an ad group's status, name, or default CPC bid."""
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupService")
+    op = client.get_type("AdGroupOperation")
+    cid = format_customer_id(customer_id)
+
+    ag = op.update
+    ag.resource_name = service.ad_group_path(cid, ad_group_id)
+    paths = []
+    if status:
+        ag.status = getattr(client.enums.AdGroupStatusEnum, status.upper())
+        paths.append("status")
+    if name:
+        ag.name = name
+        paths.append("name")
+    if cpc_bid_micros is not None:
+        ag.cpc_bid_micros = cpc_bid_micros
+        paths.append("cpc_bid_micros")
+    if not paths:
+        return {"success": False, "error": "Provide at least one field to update"}
+    op.update_mask.paths.extend(paths)
+
+    try:
+        response = service.mutate_ad_groups(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def update_ad_status(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID that contains the ad"),
+    ad_id: str = Field(description="Ad ID to update"),
+    status: str = Field(description="ENABLED, PAUSED, or REMOVED")
+) -> dict:
+    """Pause, enable, or remove an individual ad."""
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    cid = format_customer_id(customer_id)
+
+    ad_group_ad = op.update
+    ad_group_ad.resource_name = service.ad_group_ad_path(cid, ad_group_id, ad_id)
+    ad_group_ad.status = getattr(client.enums.AdGroupAdStatusEnum, status.upper())
+    op.update_mask.paths.append("status")
+
+    try:
+        response = service.mutate_ad_group_ads(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Keyword update / removal ──────────────────────────────────────────────────
+
+@mcp.tool()
+def update_keyword(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID that contains the keyword"),
+    criterion_id: str = Field(description="Keyword criterion ID (from get_keyword_quality_scores)"),
+    status: str = Field(default=None, description="ENABLED or PAUSED"),
+    cpc_bid_micros: int = Field(default=None, description="New CPC bid in micros")
+) -> dict:
+    """Update a keyword's status or individual CPC bid."""
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupCriterionService")
+    op = client.get_type("AdGroupCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    criterion = op.update
+    criterion.resource_name = service.ad_group_criterion_path(cid, ad_group_id, criterion_id)
+    paths = []
+    if status:
+        criterion.status = getattr(client.enums.AdGroupCriterionStatusEnum, status.upper())
+        paths.append("status")
+    if cpc_bid_micros is not None:
+        criterion.cpc_bid_micros = cpc_bid_micros
+        paths.append("cpc_bid_micros")
+    if not paths:
+        return {"success": False, "error": "Provide at least one field to update (status or cpc_bid_micros)"}
+    op.update_mask.paths.extend(paths)
+
+    try:
+        response = service.mutate_ad_group_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def remove_keyword(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID that contains the keyword"),
+    criterion_id: str = Field(description="Keyword criterion ID to remove permanently")
+) -> dict:
+    """Permanently remove a keyword from an ad group."""
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupCriterionService")
+    op = client.get_type("AdGroupCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    op.remove = service.ad_group_criterion_path(cid, ad_group_id, criterion_id)
+
+    try:
+        response = service.mutate_ad_group_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "removed": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Shared negative keyword lists ─────────────────────────────────────────────
+
+@mcp.tool()
+def create_negative_keyword_list(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    name: str = Field(description="Name for the shared negative keyword list")
+) -> dict:
+    """
+    Create a shared negative keyword list.
+    Returns shared_set_id to use with add_keywords_to_negative_list and
+    attach_negative_keyword_list_to_campaign.
+    """
+    client = get_google_ads_client()
+    service = client.get_service("SharedSetService")
+    op = client.get_type("SharedSetOperation")
+    cid = format_customer_id(customer_id)
+
+    shared_set = op.create
+    shared_set.name = name
+    shared_set.type_ = client.enums.SharedSetTypeEnum.NEGATIVE_KEYWORDS
+
+    try:
+        response = service.mutate_shared_sets(customer_id=cid, operations=[op])
+        resource_name = response.results[0].resource_name
+        return {
+            "success": True,
+            "resource_name": resource_name,
+            "shared_set_id": resource_name.split("/")[-1],
+        }
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def add_keywords_to_negative_list(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    shared_set_id: str = Field(description="Shared set ID from create_negative_keyword_list"),
+    keywords: list = Field(description='Keyword strings to add, e.g. ["free", "cheap", "diy"]'),
+    match_type: str = Field(default="BROAD", description="BROAD, PHRASE, or EXACT")
+) -> dict:
+    """Add negative keywords to an existing shared negative keyword list."""
+    client = get_google_ads_client()
+    service = client.get_service("SharedCriterionService")
+    cid = format_customer_id(customer_id)
+    shared_set_resource = client.get_service("SharedSetService").shared_set_path(cid, shared_set_id)
+
+    operations = []
+    for kw_text in keywords:
+        op = client.get_type("SharedCriterionOperation")
+        criterion = op.create
+        criterion.shared_set = shared_set_resource
+        criterion.keyword.text = kw_text
+        criterion.keyword.match_type = getattr(client.enums.KeywordMatchTypeEnum, match_type.upper())
+        operations.append(op)
+
+    try:
+        response = service.mutate_shared_criteria(customer_id=cid, operations=operations)
+        return {"success": True, "added": [r.resource_name for r in response.results]}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def attach_negative_keyword_list_to_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to attach the list to"),
+    shared_set_id: str = Field(description="Shared set ID from create_negative_keyword_list")
+) -> dict:
+    """Attach a shared negative keyword list to a campaign."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignSharedSetService")
+    op = client.get_type("CampaignSharedSetOperation")
+    cid = format_customer_id(customer_id)
+
+    css = op.create
+    css.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    css.shared_set = client.get_service("SharedSetService").shared_set_path(cid, shared_set_id)
+
+    try:
+        response = service.mutate_campaign_shared_sets(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Asset upload ──────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def upload_image_asset(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    name: str = Field(description="Asset name — must be unique in the account"),
+    image_data_base64: str = Field(description="Base64-encoded image bytes. Encode with: base64.b64encode(open('img.jpg','rb').read()).decode()")
+) -> dict:
+    """
+    Upload an image to the Google Ads asset library.
+    Returns resource_name for use in ads, sitelinks, or campaign assets.
+    """
+    client = get_google_ads_client()
+    service = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    cid = format_customer_id(customer_id)
+
+    asset = op.create
+    asset.name = name
+    asset.type_ = client.enums.AssetTypeEnum.IMAGE
+    asset.image_asset.data = base64.b64decode(image_data_base64)
+
+    try:
+        response = service.mutate_assets(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Targeting ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def add_location_target(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID"),
+    location_id: str = Field(description="Geo target constant ID — e.g. 2840=USA, 2826=UK, 2036=Australia, 2276=Germany"),
+    negative: bool = Field(default=False, description="True to exclude this location"),
+    bid_modifier: float = Field(default=1.0, description="Bid multiplier e.g. 1.2 = +20% (ignored for negative targets)")
+) -> dict:
+    """
+    Add a location target or exclusion to a campaign.
+    Find country/city IDs in Google's geo targets reference CSV.
+    """
+    client = get_google_ads_client()
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    criterion = op.create
+    criterion.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    criterion.negative = negative
+    criterion.location.geo_target_constant = f"geoTargetConstants/{location_id}"
+    if not negative and bid_modifier != 1.0:
+        criterion.bid_modifier = bid_modifier
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def add_device_bid_adjustment(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID"),
+    device: str = Field(description="MOBILE, TABLET, DESKTOP, or CONNECTED_TV"),
+    bid_modifier: float = Field(description="Multiplier — e.g. 0.5 = -50%, 1.3 = +30%, 0.0 = opt out of device")
+) -> dict:
+    """Set a bid adjustment for a specific device type on a campaign."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    criterion = op.create
+    criterion.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    criterion.device.type_ = getattr(client.enums.DeviceEnum, device.upper())
+    criterion.bid_modifier = bid_modifier
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def add_ad_schedule(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID"),
+    day_of_week: str = Field(description="MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, or SUNDAY"),
+    start_hour: int = Field(description="Start hour 0–23"),
+    end_hour: int = Field(description="End hour 1–24 (use 24 for end of day)"),
+    bid_modifier: float = Field(default=1.0, description="Bid multiplier for this slot — e.g. 1.2 = +20%")
+) -> dict:
+    """Add a day-parting rule (ad schedule) to a campaign."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    criterion = op.create
+    criterion.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    criterion.ad_schedule.day_of_week = getattr(client.enums.DayOfWeekEnum, day_of_week.upper())
+    criterion.ad_schedule.start_hour = start_hour
+    criterion.ad_schedule.start_minute = client.enums.MinuteOfHourEnum.ZERO
+    criterion.ad_schedule.end_hour = end_hour
+    criterion.ad_schedule.end_minute = client.enums.MinuteOfHourEnum.ZERO
+    criterion.bid_modifier = bid_modifier
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Extensions (asset-based, API v14+) ───────────────────────────────────────
+
+@mcp.tool()
+def add_sitelink_to_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to attach the sitelink to"),
+    link_text: str = Field(description="Sitelink anchor text shown in the ad (max 25 chars)"),
+    final_url: str = Field(description="Landing page URL for this sitelink"),
+    description1: str = Field(default="", description="Optional first description line (max 35 chars)"),
+    description2: str = Field(default="", description="Optional second description line (max 35 chars)")
+) -> dict:
+    """Create a sitelink asset and attach it to a campaign."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+
+    asset_service = client.get_service("AssetService")
+    asset_op = client.get_type("AssetOperation")
+    asset = asset_op.create
+    asset.name = f"Sitelink: {link_text}"
+    asset.sitelink_asset.link_text = link_text
+    asset.sitelink_asset.final_urls.append(final_url)
+    if description1:
+        asset.sitelink_asset.description1 = description1
+    if description2:
+        asset.sitelink_asset.description2 = description2
+
+    try:
+        asset_response = asset_service.mutate_assets(customer_id=cid, operations=[asset_op])
+        asset_resource_name = asset_response.results[0].resource_name
+    except GoogleAdsException as e:
+        return {"success": False, "error": f"Failed to create sitelink asset: {str(e)}"}
+
+    campaign_asset_service = client.get_service("CampaignAssetService")
+    campaign_asset_op = client.get_type("CampaignAssetOperation")
+    ca = campaign_asset_op.create
+    ca.asset = asset_resource_name
+    ca.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    ca.field_type = client.enums.AssetFieldTypeEnum.SITELINK
+
+    try:
+        ca_response = campaign_asset_service.mutate_campaign_assets(customer_id=cid, operations=[campaign_asset_op])
+        return {
+            "success": True,
+            "asset_resource_name": asset_resource_name,
+            "campaign_asset_resource_name": ca_response.results[0].resource_name,
+        }
+    except GoogleAdsException as e:
+        return {"success": False, "error": f"Asset created but failed to link: {str(e)}"}
+
+
+@mcp.tool()
+def add_callout_to_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to attach the callout to"),
+    callout_text: str = Field(description="Callout text shown in the ad (max 25 chars)")
+) -> dict:
+    """Create a callout asset and attach it to a campaign."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+
+    asset_service = client.get_service("AssetService")
+    asset_op = client.get_type("AssetOperation")
+    asset = asset_op.create
+    asset.name = f"Callout: {callout_text}"
+    asset.callout_asset.callout_text = callout_text
+
+    try:
+        asset_response = asset_service.mutate_assets(customer_id=cid, operations=[asset_op])
+        asset_resource_name = asset_response.results[0].resource_name
+    except GoogleAdsException as e:
+        return {"success": False, "error": f"Failed to create callout asset: {str(e)}"}
+
+    campaign_asset_service = client.get_service("CampaignAssetService")
+    campaign_asset_op = client.get_type("CampaignAssetOperation")
+    ca = campaign_asset_op.create
+    ca.asset = asset_resource_name
+    ca.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    ca.field_type = client.enums.AssetFieldTypeEnum.CALLOUT
+
+    try:
+        ca_response = campaign_asset_service.mutate_campaign_assets(customer_id=cid, operations=[campaign_asset_op])
+        return {
+            "success": True,
+            "asset_resource_name": asset_resource_name,
+            "campaign_asset_resource_name": ca_response.results[0].resource_name,
+        }
+    except GoogleAdsException as e:
+        return {"success": False, "error": f"Asset created but failed to link: {str(e)}"}
+
+
+# ── Recommendations ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def apply_recommendation(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    recommendation_resource_name: str = Field(description="resource_name from get_recommendations, e.g. customers/123/recommendations/456")
+) -> dict:
+    """Apply a Google recommendation to the account."""
+    client = get_google_ads_client()
+    service = client.get_service("RecommendationService")
+    cid = format_customer_id(customer_id)
+
+    op = client.get_type("ApplyRecommendationOperation")
+    op.resource_name = recommendation_resource_name
+
+    try:
+        response = service.apply_recommendations(customer_id=cid, operations=[op])
+        return {"success": True, "applied": [r.resource_name for r in response.results]}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def dismiss_recommendation(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    recommendation_resource_name: str = Field(description="resource_name from get_recommendations, e.g. customers/123/recommendations/456")
+) -> dict:
+    """Dismiss a Google recommendation so it stops appearing in the account."""
+    client = get_google_ads_client()
+    service = client.get_service("RecommendationService")
+    cid = format_customer_id(customer_id)
+
+    try:
+        service.dismiss_recommendations(
+            customer_id=cid,
+            operations=[{"resource_name": recommendation_resource_name}],
+        )
+        return {"success": True, "dismissed": recommendation_resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Conversion tracking ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def create_conversion_action(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    name: str = Field(description="Conversion action name"),
+    category: str = Field(default="PURCHASE", description="PURCHASE, LEAD, SIGNUP, PAGE_VIEW, DOWNLOAD, or OTHER"),
+    conversion_type: str = Field(default="WEBPAGE", description="WEBPAGE, PHONE_CALL, APP_INSTALL, IMPORT, or UPLOAD_CLICKS"),
+    default_value: float = Field(default=0.0, description="Default conversion value in account currency (0 = variable)"),
+    counting_type: str = Field(default="ONE_PER_CLICK", description="ONE_PER_CLICK or MANY_PER_CLICK")
+) -> dict:
+    """Create a new conversion action for tracking goals (purchases, leads, sign-ups, etc.)."""
+    client = get_google_ads_client()
+    service = client.get_service("ConversionActionService")
+    op = client.get_type("ConversionActionOperation")
+    cid = format_customer_id(customer_id)
+
+    ca = op.create
+    ca.name = name
+    ca.type_ = getattr(client.enums.ConversionActionTypeEnum, conversion_type.upper())
+    ca.category = getattr(client.enums.ConversionActionCategoryEnum, category.upper())
+    ca.status = client.enums.ConversionActionStatusEnum.ENABLED
+    ca.counting_type = getattr(client.enums.ConversionActionCountingTypeEnum, counting_type.upper())
+    ca.value_settings.default_value = default_value
+    ca.value_settings.always_use_default_value = default_value > 0
+
+    try:
+        response = service.mutate_conversion_actions(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
 
 def main():
     """Entry point for uvx / console_scripts."""
