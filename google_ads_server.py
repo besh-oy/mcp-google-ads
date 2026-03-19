@@ -1762,6 +1762,41 @@ async def get_recommendations(
     return await run_gaql(customer_id, query)
 
 
+# ── Geo target lookup ────────────────────────────────────────────────────────
+
+@mcp.tool()
+def suggest_geo_targets(
+    query: str = Field(description="Location name to search for, e.g. 'Brussels', 'Antwerp'"),
+    country_code: str = Field(default="BE", description="ISO country code to narrow results, e.g. BE, US, GB, DE"),
+    locale: str = Field(default="en", description="BCP-47 locale for result names, e.g. 'en', 'nl', 'fr'")
+) -> dict:
+    """
+    Look up geo target constant IDs by location name.
+    Use the returned id values with add_location_target.
+    """
+    client = get_google_ads_client()
+    gtc_service = client.get_service("GeoTargetConstantService")
+    request = client.get_type("SuggestGeoTargetConstantsRequest")
+    request.locale = locale
+    request.country_code = country_code
+    request.location_names.names.append(query)
+
+    try:
+        response = gtc_service.suggest_geo_target_constants(request=request)
+        results = []
+        for suggestion in response.geo_target_constant_suggestions:
+            gtc = suggestion.geo_target_constant
+            results.append({
+                "id": gtc.id,
+                "name": gtc.name,
+                "type": gtc.target_type,
+                "canonical": gtc.canonical_name,
+            })
+        return {"results": results}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
 # ── Campaign structure: create ────────────────────────────────────────────────
 
 @mcp.tool()
