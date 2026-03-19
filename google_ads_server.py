@@ -2181,6 +2181,27 @@ def upload_image_asset(
 # ── Targeting ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
+def remove_location_target(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID the location target belongs to"),
+    criterion_id: str = Field(description="Criterion ID of the location target to remove (from get_geographic_performance or the campaign criteria)")
+) -> dict:
+    """Remove a location target from a campaign by its criterion ID."""
+    client = get_google_ads_client()
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+    cid = format_customer_id(customer_id)
+
+    op.remove = service.campaign_criterion_path(cid, campaign_id, criterion_id)
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "removed": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
 def add_location_target(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     campaign_id: str = Field(description="Campaign ID"),
