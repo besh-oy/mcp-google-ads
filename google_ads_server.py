@@ -84,7 +84,13 @@ def get_credentials():
         client_id=client_id,
         client_secret=client_secret,
     )
-    creds.refresh(Request())
+    try:
+        creds.refresh(Request())
+    except RefreshError as e:
+        raise ValueError(
+            "OAuth refresh token has expired or been revoked. "
+            "Re-run get_refresh_token.py to generate a new one and update GOOGLE_ADS_REFRESH_TOKEN."
+        ) from e
     logger.info("OAuth credentials loaded and refreshed from environment variables")
     return creds
 
