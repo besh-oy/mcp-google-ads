@@ -1884,7 +1884,7 @@ def create_campaign(
         client.enums.AdvertisingChannelTypeEnum, advertising_channel_type.upper()
     )
     campaign.status = getattr(client.enums.CampaignStatusEnum, status.upper())
-    campaign.contains_eu_political_advertising = client.enums.ContainsEuPoliticalAdvertisingEnum.NO
+    campaign.contains_eu_political_advertising = 2  # 2 = NO (UNSPECIFIED=0, UNKNOWN=1, NO=2, YES=3)
 
     if advertising_channel_type.upper() == "SEARCH":
         campaign.network_settings.target_google_search = True
