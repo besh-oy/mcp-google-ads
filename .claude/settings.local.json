@@ -3,7 +3,13 @@
     "allow": [
       "Bash(pip install:*)",
       "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
-      "Bash(python -m pip install google-auth-oauthlib python-dotenv)"
+      "Bash(python -m pip install google-auth-oauthlib python-dotenv)",
+      "Bash(pip3 install:*)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "mcp__claude_ai_Google_ads_mcp__google-ads-rw__list_accounts",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)"
     ]
   }
 }
