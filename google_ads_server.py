@@ -1828,6 +1828,30 @@ def create_campaign_budget(
 
 
 @mcp.tool()
+def update_campaign_budget(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    budget_id: str = Field(description="Campaign budget ID to update"),
+    amount_micros: int = Field(description="New daily budget in micros — e.g. 10000000 = $10/day")
+) -> dict:
+    """Update the daily amount of an existing campaign budget."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+    service = client.get_service("CampaignBudgetService")
+    op = client.get_type("CampaignBudgetOperation")
+
+    budget = op.update
+    budget.resource_name = f"customers/{cid}/campaignBudgets/{budget_id}"
+    budget.amount_micros = amount_micros
+    op.update_mask.paths.append("amount_micros")
+
+    try:
+        response = service.mutate_campaign_budgets(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
 def create_campaign(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     name: str = Field(description="Campaign name"),
