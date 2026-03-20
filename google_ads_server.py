@@ -1909,6 +1909,30 @@ def create_campaign(
 
 
 @mcp.tool()
+def update_campaign_budget_link(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to update"),
+    budget_resource_name: str = Field(description="Budget resource name to assign, e.g. customers/123/campaignBudgets/456")
+) -> dict:
+    """Reassign a campaign to a different budget."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+    service = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+
+    camp = op.update
+    camp.resource_name = f"customers/{cid}/campaigns/{campaign_id}"
+    camp.campaign_budget = budget_resource_name
+    op.update_mask.paths.append("campaign_budget")
+
+    try:
+        response = service.mutate_campaigns(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
 def create_ad_group(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     campaign_id: str = Field(description="Campaign ID to create the ad group in"),
