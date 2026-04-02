@@ -1972,9 +1972,13 @@ def update_campaign(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     campaign_id: str = Field(description="Campaign ID to update"),
     status: str = Field(default=None, description="ENABLED, PAUSED, or REMOVED"),
-    name: str = Field(default=None, description="New campaign name")
+    name: str = Field(default=None, description="New campaign name"),
+    contains_eu_political_advertising: str = Field(default=None, description="YES or NO — set EU political advertising flag"),
+    target_google_search: bool = Field(default=None, description="Show ads on Google Search"),
+    target_search_network: bool = Field(default=None, description="Show ads on search partner sites"),
+    target_content_network: bool = Field(default=None, description="Show ads on Display Network")
 ) -> dict:
-    """Update a campaign's status or name. Use status=REMOVED to permanently delete it."""
+    """Update a campaign's status, name, EU political advertising flag, or network settings."""
     client = get_google_ads_client()
     service = client.get_service("CampaignService")
     op = client.get_type("CampaignOperation")
@@ -1989,13 +1993,71 @@ def update_campaign(
     if name:
         campaign.name = name
         paths.append("name")
+    if contains_eu_political_advertising:
+        # UNSPECIFIED=0, UNKNOWN=1, NO=2, YES=3
+        campaign.contains_eu_political_advertising = 3 if contains_eu_political_advertising.upper() == "YES" else 2
+        paths.append("contains_eu_political_advertising")
+    if target_google_search is not None:
+        campaign.network_settings.target_google_search = target_google_search
+        paths.append("network_settings.target_google_search")
+    if target_search_network is not None:
+        campaign.network_settings.target_search_network = target_search_network
+        paths.append("network_settings.target_search_network")
+    if target_content_network is not None:
+        campaign.network_settings.target_content_network = target_content_network
+        paths.append("network_settings.target_content_network")
     if not paths:
-        return {"success": False, "error": "Provide at least one field to update (status or name)"}
+        return {"success": False, "error": "Provide at least one field to update"}
     op.update_mask.paths.extend(paths)
 
     try:
         response = service.mutate_campaigns(customer_id=cid, operations=[op])
         return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def set_campaign_language(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID to set language for"),
+    language_id: str = Field(description="Language criterion ID — e.g. 1000=English, 1001=German, 1002=French, 1003=Spanish, 1004=Italian, 1010=Dutch, 1014=Portuguese")
+) -> dict:
+    """Add a language target to a campaign. Common IDs: 1000=English, 1001=German, 1002=French, 1003=Spanish, 1004=Italian, 1010=Dutch, 1014=Portuguese."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+
+    criterion = op.create
+    criterion.campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    criterion.language.language_constant = f"languageConstants/{language_id}"
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def remove_campaign_language(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(description="Campaign ID"),
+    language_id: str = Field(description="Language criterion ID to remove — e.g. 1000=English, 1001=German, 1002=French, 1010=Dutch")
+) -> dict:
+    """Remove a language target from a campaign."""
+    client = get_google_ads_client()
+    cid = format_customer_id(customer_id)
+    service = client.get_service("CampaignCriterionService")
+    op = client.get_type("CampaignCriterionOperation")
+
+    # The resource name for a language criterion follows this pattern
+    op.remove = f"customers/{cid}/campaignCriteria/{campaign_id}~{language_id}"
+
+    try:
+        response = service.mutate_campaign_criteria(customer_id=cid, operations=[op])
+        return {"success": True, "removed": response.results[0].resource_name}
     except GoogleAdsException as e:
         return {"success": False, "error": str(e)}
 

@@ -13,7 +13,17 @@
       "Bash(python3 -c \"from google.ads.googleads.client import GoogleAdsClient; help\\(GoogleAdsClient.get_type\\)\")",
       "Bash(python3 -c \"from google.ads.googleads.v23.resources.types.campaign import Campaign; c = Campaign\\(\\); print\\([f for f in dir\\(c\\) if ''eu'' in f.lower\\(\\) or ''political'' in f.lower\\(\\)]\\)\")",
       "Bash(pip3 show:*)",
-      "Bash(uvx --from \"git+https://github.com/besh-oy/mcp-google-ads.git\" python -c \"from google.ads.googleads.v23.resources.types.campaign import Campaign; c = Campaign\\(\\); print\\([f for f in dir\\(c\\) if ''eu'' in f.lower\\(\\) or ''political'' in f.lower\\(\\)]\\)\")"
+      "Bash(uvx --from \"git+https://github.com/besh-oy/mcp-google-ads.git\" python -c \"from google.ads.googleads.v23.resources.types.campaign import Campaign; c = Campaign\\(\\); print\\([f for f in dir\\(c\\) if ''eu'' in f.lower\\(\\) or ''political'' in f.lower\\(\\)]\\)\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/googleanalytics/google-analytics-mcp/main/README.md\")",
+      "WebFetch(domain:coolify.io)",
+      "WebSearch",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:www.callmefred.com)",
+      "WebFetch(domain:www.google.com)",
+      "WebFetch(domain:www.mail-archive.com)",
+      "WebFetch(domain:groups.google.com)",
+      "WebFetch(domain:support.google.com)",
+      "mcp__claude_ai_Google_ads_mcp__google-ads-rw__execute_gaql_query"
     ]
   }
 }
