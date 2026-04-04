@@ -1884,7 +1884,7 @@ def create_campaign(
         client.enums.AdvertisingChannelTypeEnum, advertising_channel_type.upper()
     )
     campaign.status = getattr(client.enums.CampaignStatusEnum, status.upper())
-    campaign.contains_eu_political_advertising = 2  # 2 = NO (UNSPECIFIED=0, UNKNOWN=1, NO=2, YES=3)
+    campaign.contains_eu_political_advertising = 3  # 3 = DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING (safe default)
 
     if advertising_channel_type.upper() == "SEARCH":
         campaign.network_settings.target_google_search = True
@@ -1994,8 +1994,8 @@ def update_campaign(
         campaign.name = name
         paths.append("name")
     if contains_eu_political_advertising:
-        # UNSPECIFIED=0, UNKNOWN=1, NO=2, YES=3
-        campaign.contains_eu_political_advertising = 3 if contains_eu_political_advertising.upper() == "YES" else 2
+        # 2 = CONTAINS_EU_POLITICAL_ADVERTISING, 3 = DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        campaign.contains_eu_political_advertising = 2 if contains_eu_political_advertising.upper() == "YES" else 3
         paths.append("contains_eu_political_advertising")
     if target_google_search is not None:
         campaign.network_settings.target_google_search = target_google_search

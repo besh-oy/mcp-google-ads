@@ -23,7 +23,8 @@
       "WebFetch(domain:www.mail-archive.com)",
       "WebFetch(domain:groups.google.com)",
       "WebFetch(domain:support.google.com)",
-      "mcp__claude_ai_Google_ads_mcp__google-ads-rw__execute_gaql_query"
+      "mcp__claude_ai_Google_ads_mcp__google-ads-rw__execute_gaql_query",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
