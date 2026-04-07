@@ -1529,6 +1529,57 @@ def create_rsa_ad(
         return {"success": False, "error": str(e)}
 
 
+@mcp.tool()
+def update_rsa_ad(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    ad_group_id: str = Field(description="Ad group ID containing the ad"),
+    ad_id: str = Field(description="The ad ID to update"),
+    headlines: list = Field(default=None, description="Full replacement list of headline strings (3–15 items, max 30 chars each)"),
+    descriptions: list = Field(default=None, description="Full replacement list of description strings (2–4 items, max 90 chars each)"),
+    status: str = Field(default=None, description="ENABLED or PAUSED")
+) -> dict:
+    """Update an existing Responsive Search Ad (RSA) in place, preserving its performance history."""
+    if not headlines and not descriptions and not status:
+        return {"success": False, "error": "At least one of headlines, descriptions, or status must be provided"}
+
+    client = get_google_ads_client()
+    service = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    cid = format_customer_id(customer_id)
+
+    ad_group_ad = op.update
+    ad_group_ad.resource_name = service.ad_group_ad_path(cid, ad_group_id, ad_id)
+    paths = []
+
+    if headlines is not None:
+        # Clear existing headlines and add new ones
+        for text in headlines[:15]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            ad_group_ad.ad.responsive_search_ad.headlines.append(asset)
+        paths.append("ad.responsive_search_ad.headlines")
+
+    if descriptions is not None:
+        # Clear existing descriptions and add new ones
+        for text in descriptions[:4]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            ad_group_ad.ad.responsive_search_ad.descriptions.append(asset)
+        paths.append("ad.responsive_search_ad.descriptions")
+
+    if status:
+        ad_group_ad.status = getattr(client.enums.AdGroupAdStatusEnum, status.upper())
+        paths.append("status")
+
+    op.update_mask.paths.extend(paths)
+
+    try:
+        response = service.mutate_ad_group_ads(customer_id=cid, operations=[op])
+        return {"success": True, "resource_name": response.results[0].resource_name}
+    except GoogleAdsException as e:
+        return {"success": False, "error": str(e)}
+
+
 # ── Additional reporting tools ────────────────────────────────────────────────
 
 @mcp.tool()

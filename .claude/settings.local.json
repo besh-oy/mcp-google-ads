@@ -24,7 +24,8 @@
       "WebFetch(domain:groups.google.com)",
       "WebFetch(domain:support.google.com)",
       "mcp__claude_ai_Google_ads_mcp__google-ads-rw__execute_gaql_query",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(python -m py_compile google_ads_server.py)"
     ]
   }
 }
