@@ -2470,7 +2470,7 @@ def add_sitelink_to_campaign(
     asset = asset_op.create
     asset.name = f"Sitelink: {link_text}"
     asset.sitelink_asset.link_text = link_text
-    asset.sitelink_asset.final_urls.append(final_url)
+    asset.final_urls.append(final_url)
     if description1:
         asset.sitelink_asset.description1 = description1
     if description2:
