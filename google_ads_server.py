@@ -1534,11 +1534,17 @@ def update_rsa_ad(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     ad_id: str = Field(description="The ad ID to update"),
     headlines: list = Field(default=None, description="Full replacement list of headline strings (3–15 items, max 30 chars each)"),
-    descriptions: list = Field(default=None, description="Full replacement list of description strings (2–4 items, max 90 chars each)")
+    descriptions: list = Field(default=None, description="Full replacement list of description strings (2–4 items, max 90 chars each)"),
+    final_url: str = Field(default=None, description="New landing page URL (must start with http:// or https://)"),
+    path1: str = Field(default=None, description="Display path 1 shown in the ad URL"),
+    path2: str = Field(default=None, description="Display path 2 shown in the ad URL")
 ) -> dict:
-    """Update an existing Responsive Search Ad (RSA) in place, preserving its performance history."""
-    if not headlines and not descriptions:
-        return {"success": False, "error": "At least one of headlines or descriptions must be provided"}
+    """Update an existing Responsive Search Ad in place, preserving its performance history. Can update headlines, descriptions, final URL, and display paths."""
+    if headlines is None and descriptions is None and final_url is None and path1 is None and path2 is None:
+        return {"success": False, "error": "At least one of headlines, descriptions, final_url, path1, or path2 must be provided"}
+
+    if final_url is not None and not (final_url.startswith("http://") or final_url.startswith("https://")):
+        return {"success": False, "error": "final_url must start with http:// or https://"}
 
     client = get_google_ads_client()
     service = client.get_service("AdService")
@@ -1564,6 +1570,18 @@ def update_rsa_ad(
             asset.text = text
             ad.responsive_search_ad.descriptions.append(asset)
         paths.append("responsive_search_ad.descriptions")
+
+    if final_url is not None:
+        ad.final_urls.append(final_url)
+        paths.append("final_urls")
+
+    if path1 is not None:
+        ad.responsive_search_ad.path1 = path1
+        paths.append("responsive_search_ad.path1")
+
+    if path2 is not None:
+        ad.responsive_search_ad.path2 = path2
+        paths.append("responsive_search_ad.path2")
 
     op.update_mask.paths.extend(paths)
 
